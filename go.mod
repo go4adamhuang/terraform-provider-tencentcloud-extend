@@ -6,7 +6,11 @@ require github.com/hashicorp/terraform-plugin-framework v1.13.0
 
 require github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/dnspod v1.3.59
 
-require github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/teo v1.3.57 // indirect
+require (
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts v1.1.11 // indirect
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tag v1.3.54 // indirect
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/teo v1.3.57 // indirect
+)
 
 require (
 	github.com/fatih/color v1.13.0 // indirect

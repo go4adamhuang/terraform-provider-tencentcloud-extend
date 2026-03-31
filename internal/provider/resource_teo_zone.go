@@ -10,12 +10,13 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
+	sts "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts/v20180813"
+	tagsvc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tag/v20180813"
 	teo "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/teo/v20220901"
 )
 
@@ -24,6 +25,7 @@ var _ resource.ResourceWithImportState = &TeoZoneResource{}
 
 type TeoZoneResource struct {
 	client *teo.Client
+	cfg    *ClientConfig
 }
 
 type TeoZoneModel struct {
@@ -102,10 +104,7 @@ func (r *TeoZoneResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"tags": schema.MapAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Tag key-value pairs. Note: tags can only be set at creation time; use the TencentCloud tag service to update tags after creation.",
-				PlanModifiers: []planmodifier.Map{
-					mapplanmodifier.RequiresReplace(),
-				},
+				Description: "Tag key-value pairs.",
 			},
 			"work_mode_infos": schema.ListNestedAttribute{
 				Optional:    true,
@@ -199,6 +198,7 @@ func (r *TeoZoneResource) Configure(_ context.Context, req resource.ConfigureReq
 		return
 	}
 	r.client = client
+	r.cfg = cfg
 }
 
 func (r *TeoZoneResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -316,6 +316,14 @@ func (r *TeoZoneResource) Update(ctx context.Context, req resource.UpdateRequest
 	// work_mode_infos: separate API
 	if !plan.WorkModeInfos.Equal(state.WorkModeInfos) {
 		r.setWorkMode(ctx, zoneID, plan.WorkModeInfos, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
+	// tags: use TencentCloud tag service for in-place update
+	if !plan.Tags.Equal(state.Tags) {
+		r.updateTags(zoneID, state.Tags, plan.Tags, &resp.Diagnostics)
 		if resp.Diagnostics.HasError() {
 			return
 		}
@@ -573,4 +581,84 @@ func strDeref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// updateTags computes a diff between state and plan tags and applies it via the
+// TencentCloud tag service (ModifyResourceTags). This avoids force-replacing the
+// zone just because tags changed.
+func (r *TeoZoneResource) updateTags(zoneID string, stateTags, planTags types.Map, diags *diag.Diagnostics) {
+	stateMap := tagsToStringMap(stateTags)
+	planMap := tagsToStringMap(planTags)
+
+	var replaceTags []*tagsvc.Tag
+	var deleteTags []*tagsvc.TagKeyObject
+
+	for k, v := range planMap {
+		key, val := k, v
+		replaceTags = append(replaceTags, &tagsvc.Tag{TagKey: &key, TagValue: &val})
+	}
+	for k := range stateMap {
+		if _, ok := planMap[k]; !ok {
+			key := k
+			deleteTags = append(deleteTags, &tagsvc.TagKeyObject{TagKey: &key})
+		}
+	}
+
+	if len(replaceTags) == 0 && len(deleteTags) == 0 {
+		return
+	}
+
+	uin, err := r.getCallerUIN()
+	if err != nil {
+		diags.AddError("Failed to get caller UIN for tag update", err.Error())
+		return
+	}
+
+	resourceDesc := fmt.Sprintf("qcs::teo:%s:uin/%s:zone/%s", r.cfg.Region, uin, zoneID)
+
+	cred := common.NewCredential(r.cfg.SecretID, r.cfg.SecretKey)
+	tagClient, err := tagsvc.NewClient(cred, r.cfg.Region, profile.NewClientProfile())
+	if err != nil {
+		diags.AddError("Failed to create tag client", err.Error())
+		return
+	}
+
+	req := tagsvc.NewModifyResourceTagsRequest()
+	req.Resource = strPtr(resourceDesc)
+	req.ReplaceTags = replaceTags
+	req.DeleteTags = deleteTags
+
+	if _, err := tagClient.ModifyResourceTags(req); err != nil {
+		diags.AddError("Failed to update TEO zone tags", err.Error())
+	}
+}
+
+// getCallerUIN fetches the root account UIN via STS GetCallerIdentity.
+// Required to build the tag service resource descriptor (qcs::...:uin/<UIN>:...).
+func (r *TeoZoneResource) getCallerUIN() (string, error) {
+	cred := common.NewCredential(r.cfg.SecretID, r.cfg.SecretKey)
+	stsClient, err := sts.NewClient(cred, r.cfg.Region, profile.NewClientProfile())
+	if err != nil {
+		return "", err
+	}
+	resp, err := stsClient.GetCallerIdentity(sts.NewGetCallerIdentityRequest())
+	if err != nil {
+		return "", err
+	}
+	if resp.Response.AccountId == nil {
+		return "", fmt.Errorf("STS GetCallerIdentity returned nil AccountId")
+	}
+	return *resp.Response.AccountId, nil
+}
+
+// tagsToStringMap converts a types.Map of string tags to a plain Go map.
+func tagsToStringMap(m types.Map) map[string]string {
+	result := make(map[string]string)
+	if m.IsNull() || m.IsUnknown() {
+		return result
+	}
+	for k, v := range m.Elements() {
+		result[k] = v.(types.String).ValueString()
+	}
+	return result
 }
