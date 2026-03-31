@@ -409,14 +409,13 @@ func (r *TeoZoneResource) refresh(_ context.Context, m *TeoZoneModel, diags *dia
 		m.PlanID = types.StringValue(*z.Resources[0].Id)
 	}
 
-	// tags: preserve null if not set by user and API returns empty
-	if len(z.Tags) > 0 {
-		tagMap := make(map[string]attr.Value, len(z.Tags))
-		for _, t := range z.Tags {
-			if t.TagKey != nil && t.TagValue != nil {
-				tagMap[*t.TagKey] = types.StringValue(*t.TagValue)
-			}
-		}
+	// tags: read from tag service (authoritative source; TEO DescribeZones may not
+	// reflect tags set via the tag service after creation)
+	tagMap := r.fetchTagsFromService(m.ZoneID.ValueString(), diags)
+	if diags.HasError() {
+		return
+	}
+	if len(tagMap) > 0 {
 		m.Tags = types.MapValueMust(types.StringType, tagMap)
 	} else if m.Tags.IsNull() || m.Tags.IsUnknown() {
 		m.Tags = types.MapNull(types.StringType)
@@ -581,6 +580,38 @@ func strDeref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// fetchTagsFromService queries the TencentCloud tag service for the current tags
+// of the given TEO zone. Returns nil map if the zone has no tags.
+func (r *TeoZoneResource) fetchTagsFromService(zoneID string, diags *diag.Diagnostics) map[string]attr.Value {
+	cred := common.NewCredential(r.cfg.SecretID, r.cfg.SecretKey)
+	tagClient, err := tagsvc.NewClient(cred, r.cfg.Region, profile.NewClientProfile())
+	if err != nil {
+		diags.AddError("Failed to create tag client for read", err.Error())
+		return nil
+	}
+	serviceType := "teo"
+	resourcePrefix := "zone"
+	req := tagsvc.NewDescribeResourceTagsByResourceIdsRequest()
+	req.ServiceType = &serviceType
+	req.ResourcePrefix = &resourcePrefix
+	req.ResourceIds = []*string{&zoneID}
+	req.ResourceRegion = &r.cfg.Region
+
+	resp, err := tagClient.DescribeResourceTagsByResourceIds(req)
+	if err != nil {
+		diags.AddError("Failed to read TEO zone tags from tag service", err.Error())
+		return nil
+	}
+
+	result := make(map[string]attr.Value, len(resp.Response.Tags))
+	for _, t := range resp.Response.Tags {
+		if t.TagKey != nil && t.TagValue != nil {
+			result[*t.TagKey] = types.StringValue(*t.TagValue)
+		}
+	}
+	return result
 }
 
 // updateTags computes a diff between state and plan tags and applies it via the
