@@ -252,10 +252,27 @@ func (r *TeoZoneResource) Create(ctx context.Context, req resource.CreateRequest
 		}
 	}
 
+	// Save values the API may normalize before refresh overwrites them.
+	plannedArea := plan.Area
+	plannedPlanID := plan.PlanID
+
 	r.refresh(ctx, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	// Restore plan-specified values that the API may silently normalize (e.g.
+	// area "overseas"→"global" for global plans, or plan_id returned as a
+	// resource-pack ID rather than the plan ID). Keeping the user-supplied
+	// values here prevents "inconsistent result after apply" errors; Read will
+	// still detect real drift on subsequent runs.
+	if !plannedArea.IsNull() && !plannedArea.IsUnknown() {
+		plan.Area = plannedArea
+	}
+	if !plannedPlanID.IsNull() && !plannedPlanID.IsUnknown() {
+		plan.PlanID = plannedPlanID
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -329,10 +346,20 @@ func (r *TeoZoneResource) Update(ctx context.Context, req resource.UpdateRequest
 		}
 	}
 
+	// Save planned area before refresh may overwrite it with an API-normalized value.
+	plannedArea := plan.Area
+
 	r.refresh(ctx, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	// Restore the planned area if the user explicitly set it; the API may
+	// silently normalize it (e.g. "overseas"→"global" for global plans).
+	if !plannedArea.IsNull() && !plannedArea.IsUnknown() {
+		plan.Area = plannedArea
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
